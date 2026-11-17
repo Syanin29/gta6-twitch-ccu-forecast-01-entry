@@ -29,8 +29,9 @@ Method (v2 — winner pattern: comparables-weighted log-curve, closed form):
    blended (mu, sd) -- no Monte Carlo. The sweep proved MC identical to
    closed form to ~0.0003 (rho 0.3/0.6/0.8, 10k/20k/40k pairs all within
    noise, seed replication 0.1464 vs 0.1466), so MC only added runtime
-   (~1.5 s) and Monte Carlo noise. Closed form runs in ~0.05 s per case,
-   is perfectly deterministic, and leaves a wide margin under the 8 s cap.
+   (~1.5 s) and Monte Carlo noise. Closed form runs in under 0.5 s per
+   case end to end (interpreter startup and I/O included), is perfectly
+   deterministic, and leaves a wide margin under the 8 s cap.
 4. Calibration guards. The hour-1 log is clamped to the comparables' range
    so a record-breaking hour 1 cannot extrapolate the slope wild; median
    ratios are clamped to [0.15, 20]; quantiles are floored at 1 viewer,
@@ -68,7 +69,8 @@ Honest note: hyperparameter selection on 4 cases carries winner's curse --
 leave-one-launch-out selection averages 0.149-0.154 held-out, so the final
 loss on one new game is plausibly ~0.14-0.15, not exactly 0.1413.
 
-Standard library only, no network, deterministic, ~0.05 s per case.
+Standard library only, no network, deterministic, under 0.5 s per case
+end to end.
 """
 
 import json
