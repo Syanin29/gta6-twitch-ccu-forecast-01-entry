@@ -1,58 +1,79 @@
-"""Calibrated Monte Carlo forecaster for GTA VI launch-day Twitch viewers.
+"""Calibrated log-curve forecaster for GTA VI launch-day Twitch viewers (v2).
 
 Forecasts, for each hour 2..24 of the release day (UTC), five quantiles of the
 Twitch category's concurrent viewers, from the case file alone: hour 1's print
 plus the past big-launch curves shipped in the case (`comparables`).
 
-Method (winner pattern for forecast bounties: calibrated Monte Carlo, not one
-point prediction):
+Method (v2 — winner pattern: comparables-weighted log-curve, closed form):
 
 1. Shape from history. For every comparable launch, take its release-day
-   hourly viewers as ratios to its own hour-1 print. The ratio curve is the
-   launch-day shape: a dip in the small hours, a surge when the US unlocks
-   (05:00-08:00 UTC), a climb to an evening peak, then a fall. The shape
-   depends strongly on the launch's scale: a launch whose hour 1 is tiny
-   (category barely alive at midnight UTC, unlock later in the day) can peak
-   100x its hour 1, while a launch with a huge hour 1 peaks near 1-3x.
-   So each hour's log-ratio is regressed (OLS) on log10(hour-1 print):
-   log r_h = a_h + b_h * log10(p1). The regression is fit twice:
-   (a) on the rolling-midnight-local launches only -- the same unlock
-   pattern as GTA VI and as the four practice launches (12 curves);
-   (b) on every comparable with hour-1 >= 1000 viewers (the full set).
-   The two fits are blended 70/30 in log-quantile space: the similar
+   hourly viewers as ratios to its own hour-1 print. Each hour's log-ratio is
+   regressed (OLS) on log10(hour-1 print): log r_h = a_h + b_h * log10(p1).
+   The regression is fit twice: (a) on the rolling-midnight-local launches
+   only -- the same unlock pattern as GTA VI and as the four practice
+   launches; (b) on every comparable with hour-1 >= 1000 viewers (the full
+   set). The two fits are blended 60/40 in (mu, sd) space: the similar
    launches drive the shape, the full set stabilises it.
-2. Monte Carlo trajectories. From the blended fit, each hour has a median
-   log-ratio mu_h and a log spread sd_h (the regression's residual SD,
-   shrunk by 0.7 -- the residuals are inflated by a few extreme launches,
-   and the practice backtest says 0.7 calibrates the 90% band to ~0.92
-   coverage). 20,000 antithetic pairs of trajectories (40,000 paths) are
-   simulated in log space with AR(1) hour-to-hour correlation (rho = 0.6),
-   seeded deterministically; each hour's five quantiles are read off the
-   simulated distribution. No point forecast anywhere: the output IS the
-   simulated distribution's quantiles.
-3. Calibration guards. The median curve is smoothed (3-hour moving average
-   in log space); the hour-1 log is clamped to the comparables' range so a
-   record-breaking hour 1 cannot extrapolate the slope wild; median ratios
-   are clamped to [0.15, 20]; quantiles are floored at 1 viewer, capped at
-   1e9, and forced non-decreasing. If the case carries too few usable
-   comparables, or anything unexpected happens, the forecast falls back to
-   the house persistence baseline (hour 1 held, widening spread) so the
-   case is still valid -- an invalid case forfeits the prize outright.
+2. Calibration (chosen by a 4-regime sweep, ~70 variants; see BUILD-NOTES-v2):
+   the median is shifted +0.05 in log space (rolling launches are
+   systematically under-predicted by the pooled fit -- leave-one-out
+   residuals of rolling comparables run +0.3 in log-ratio from hour 6 on,
+   against ~0.0 for the rest), and the spread is NOT one global factor:
+   early hours (2..8, where the unlock surge timing varies most across
+   launches) use residual SD x 0.7, late hours (9..24, where the evening
+   shape is far more consistent) use residual SD x 0.5. The residual SD
+   itself is inflated by a few extreme launches, so both factors are below
+   1. No median smoothing: smoothing blunts the hour-5 surge and the
+   midday dip and cost ~0.001-0.002 in the sweep.
+3. Closed-form quantiles. The quantiles are the normal quantiles of the
+   blended (mu, sd) -- no Monte Carlo. The sweep proved MC identical to
+   closed form to ~0.0003 (rho 0.3/0.6/0.8, 10k/20k/40k pairs all within
+   noise, seed replication 0.1464 vs 0.1466), so MC only added runtime
+   (~1.5 s) and Monte Carlo noise. Closed form runs in ~0.05 s per case,
+   is perfectly deterministic, and leaves a wide margin under the 8 s cap.
+4. Calibration guards. The hour-1 log is clamped to the comparables' range
+   so a record-breaking hour 1 cannot extrapolate the slope wild; median
+   ratios are clamped to [0.15, 20]; quantiles are floored at 1 viewer,
+   capped at 1e9, and forced non-decreasing. If the case carries too few
+   usable comparables, or anything unexpected happens, the forecast falls
+   back to the house persistence baseline (hour 1 held, widening spread) so
+   the case is still valid -- an invalid case forfeits the prize outright.
+
+What was tried and REJECTED by the sweep (all numbers = mean pinball loss
+on the 4 practice cases, workbench scorer reproducing the server to ~0.001):
+- Kernel-weighted comparables (bandwidth 0.3/0.5/0.8 dex on log10(p1),
+  rolling bonus x2): worse everywhere (best 0.1471 vs 0.1413) and fragile
+  under comparable dropout (0.172 vs 0.155). Small-p1 targets depend on a
+  few small comparables; down-weighting the rest destabilises the slope.
+- Rolling-only blend (1.0): 0.1608 -- the 12-curve roll fit alone is too
+  noisy; the full set stabilises it. Blend 0.5: 0.1470; blend 0.6 wins.
+- One global spread: k=0.5 gives 0.1454, k=0.6 gives 0.1463, k=0.7 gives
+  0.1503; the hour split (0.7 early / 0.5 late) beats all of them at 0.1413.
+- Slope shrinkage (0.5-0.85), quadratic log10(p1), trimmed OLS, channels
+  as a second regressor, early-access filter on the roll set, p1_min
+  raises, empirical (non-normal) quantiles, LOO-bias correction, and a
+  p1-agnostic median stabiliser (0.1883 -- catastrophic): all rejected.
+- Tail stretch x1.25: buys stress-regime coverage (0.793 -> 0.848) but
+  costs practice loss (0.1413 -> 0.1452); rejected -- loss is what ranks.
 
 Practice backtest (ground truth = SullyGnome hourly averages for the four
 practice launches, scored with the contest's own log-scale pinball loss,
-entry run end-to-end on each practice case): mean loss 0.152 vs house
-baseline 0.387 (p00 0.156, p01 0.130, p02 0.121, p03 0.199), typical miss
-26.0% vs 82.8%, 90% coverage 0.924. Runtime ~1.0-1.7 s per case.
+entry run end-to-end on each practice case): mean loss 0.1413 vs house
+baseline 0.3871 and vs v1's 0.1517 (p00 0.134, p01 0.113, p02 0.115,
+p03 0.204), typical miss 25.0% vs 26.0% (v1) and 82.8% (baseline),
+90% coverage 0.957. Mimics-final check (other 3 practice games added to
+training, as the final's 42 comparables include them): 0.1377. Dropout
+stress (25% of comparables removed, two seeds): 0.1551 / 0.1395.
+Honest note: hyperparameter selection on 4 cases carries winner's curse --
+leave-one-launch-out selection averages 0.149-0.154 held-out, so the final
+loss on one new game is plausibly ~0.14-0.15, not exactly 0.1413.
 
-Standard library only, no network, deterministic (fixed seed, sorted
-iteration), ~1.3 s per case on one CPU.
+Standard library only, no network, deterministic, ~0.05 s per case.
 """
 
 import json
 import math
 import os
-import random
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -67,18 +88,18 @@ OUTPUT_DIR = Path(os.environ.get("MAKEFUN_OUTPUT_DIR", "/output"))
 LEVELS = [0.05, 0.25, 0.5, 0.75, 0.95]
 Z = [-1.645, -0.674, 0.0, 0.674, 1.645]
 
-# --- tuned constants (chosen on the four practice cases, see docstring) ---
-SPREAD_K = 0.7        # shrink factor on the regression residual SD
-BLEND_W = 0.7         # weight of the rolling-midnight fit in the blend
+# --- tuned constants (sweep of ~70 variants over 4 regimes; see BUILD-NOTES-v2) ---
+BLEND_W = 0.6         # weight of the rolling-midnight fit in the blend
+SPREAD_K_EARLY = 0.7  # residual-SD factor, hours 2..8 (surge timing varies)
+SPREAD_K_LATE = 0.5   # residual-SD factor, hours 9..24 (evening shape stable)
+SPREAD_SPLIT_HOUR = 8  # hours <= this use the early factor
+MEDIAN_SHIFT = 0.05   # additive log shift of the median (rolling under-prediction)
 P1_MIN_FULL = 1000    # full set: comparables with hour-1 viewers >= this
 P1_MIN_ROLL = 10000   # rolling set: comparables with hour-1 viewers >= this
 SD_FLOOR = 0.15       # never claim a log spread tighter than this
 SD_CAP = 1.5          # never claim a log spread wider than this
 RATIO_LO = 0.15       # median ratio clamp, low end
 RATIO_HI = 20.0       # median ratio clamp, high end
-N_PAIRS = 20000       # antithetic trajectory pairs (40,000 paths)
-RHO = 0.6             # AR(1) hour-to-hour correlation of log-ratio shocks
-SEED = 20261117       # fixed seed: two runs on one case are byte-identical
 BASE_SIGMA = 0.15     # fallback (house baseline) spread per sqrt-hour
 
 
@@ -169,24 +190,13 @@ def ols(xs, ys):
     return a, b, sd
 
 
-def smooth_log_curve(medians):
-    """3-hour moving average of the median curve, in log space."""
-    hours = sorted(medians)
-    out = {}
-    for i, h in enumerate(hours):
-        vals = [math.log(medians[hh])
-                for hh in hours[max(0, i - 1):i + 2]]
-        out[h] = math.exp(sum(vals) / len(vals))
-    return out
+def regression_mu_sd(curves, p1, p1_min):
+    """Per-hour (mu, sd) of log-ratio ~ log10(hour-1 print).
 
-
-def regression_quantiles(curves, p1, p1_min):
-    """Per-hour normal quantiles from log-ratio ~ log10(hour-1 print).
-
-    Returns {hour: [q05..q95]} in viewers for the hours with enough data
-    (possibly fewer than 23), or None when too few curves carry any hour.
-    The hour-1 log is clamped to the training range so the fitted slope
-    cannot extrapolate wildly for a record launch.
+    Returns {hour: (mu, sd)} in log-ratio space for the hours with enough
+    data, or None when too few curves carry any hour. The hour-1 log is
+    clamped to the training range so the fitted slope cannot extrapolate
+    wildly for a record launch; mu is clamped to the median-ratio range.
     """
     lp1 = math.log10(max(1.0, p1))
     train = [(p, r) for p, r, _ in curves if p >= p1_min]
@@ -206,15 +216,9 @@ def regression_quantiles(curves, p1, p1_min):
         a, b, sd = ols(xs, ys)
         mu = a + b * lp1
         mu = min(max(mu, math.log(RATIO_LO)), math.log(RATIO_HI))
-        sd = min(max(sd, SD_FLOOR), SD_CAP) * SPREAD_K
-        out[h] = [p1 * math.exp(mu + norm_ppf(tau) * sd) for tau in LEVELS]
-    if not out:
-        return None
-    medians = smooth_log_curve({h: out[h][2] for h in out})
-    for h in out:
-        factor = medians[h] / out[h][2]
-        out[h] = [q * factor for q in out[h]]
-    return out
+        sd = min(max(sd, SD_FLOOR), SD_CAP)
+        out[h] = (mu, sd)
+    return out or None
 
 
 def baseline_quantiles(p1):
@@ -235,7 +239,7 @@ def clean_quantiles(raw, p1):
 
 
 def forecast_case(case):
-    """Forecast one case: Monte Carlo quantiles, baseline on any failure."""
+    """Forecast one case: closed-form calibrated quantiles, baseline on failure."""
     first = next((k for k in case["known"] if k["hour"] == 1), None)
     if first is None:
         raise ValueError("case has no hour-1 print")
@@ -244,49 +248,27 @@ def forecast_case(case):
         curves = comp_curves(case)
         roll = [(p, r, u) for p, r, u in curves
                 if is_rolling(u) and p >= P1_MIN_ROLL]
-        full = regression_quantiles(curves, p1, P1_MIN_FULL)
+        full = regression_mu_sd(curves, p1, P1_MIN_FULL)
         if full is None:
             raise ValueError("too few usable comparables")
-        # Hours the full fit misses (sparse data) fall back to persistence.
+        roll_fit = regression_mu_sd(roll, p1, 1) if len(roll) >= 8 else None
         base = baseline_quantiles(p1)
-        for h in range(2, 25):
-            if h not in full:
-                full[h] = base[h]
-        roll_fit = regression_quantiles(roll, p1, 1) if len(roll) >= 8 else None
-        blended = {}
-        for h in range(2, 25):
-            if roll_fit is not None and h in roll_fit:
-                blended[h] = [math.exp(BLEND_W * math.log(roll_fit[h][i])
-                                       + (1.0 - BLEND_W) * math.log(full[h][i]))
-                              for i in range(5)]
-            else:
-                blended[h] = full[h]
-        # Monte Carlo: antithetic AR(1) trajectories in log-ratio space.
-        hours = list(range(2, 25))
-        mu = {h: math.log(blended[h][2] / p1) for h in hours}
-        sd = {h: (math.log(blended[h][4]) - math.log(blended[h][0]))
-              / (2.0 * 1.645) for h in hours}
-        rng = random.Random(SEED)
-        sims = {h: [] for h in hours}
-        innov = math.sqrt(1.0 - RHO * RHO)
-        for _ in range(N_PAIRS):
-            for sign in (1.0, -1.0):
-                shock = 0.0
-                for h in hours:
-                    shock = RHO * shock + innov * rng.gauss(0.0, 1.0)
-                    sims[h].append(math.exp(mu[h] + sign * shock * sd[h]))
         raw = {}
-        for h in hours:
-            vals = sorted(sims[h])
-            n = len(vals)
-            qs = []
-            for tau in LEVELS:
-                pos = (n - 1) * tau
-                lo = int(pos)
-                hi = min(lo + 1, n - 1)
-                frac = pos - lo
-                qs.append(p1 * (vals[lo] * (1.0 - frac) + vals[hi] * frac))
-            raw[h] = qs
+        for h in range(2, 25):
+            if roll_fit is not None and h in roll_fit and h in full:
+                mu = BLEND_W * roll_fit[h][0] + (1.0 - BLEND_W) * full[h][0]
+                sd = BLEND_W * roll_fit[h][1] + (1.0 - BLEND_W) * full[h][1]
+            elif h in full:
+                mu, sd = full[h]
+            elif roll_fit is not None and h in roll_fit:
+                mu, sd = roll_fit[h]
+            else:
+                raw[h] = base[h]
+                continue
+            mu = mu + MEDIAN_SHIFT
+            k = SPREAD_K_EARLY if h <= SPREAD_SPLIT_HOUR else SPREAD_K_LATE
+            sd = sd * k
+            raw[h] = [p1 * math.exp(mu + norm_ppf(tau) * sd) for tau in LEVELS]
         return clean_quantiles(raw, p1)
     except Exception:
         return clean_quantiles(baseline_quantiles(p1), p1)
